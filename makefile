@@ -1,9 +1,10 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11
 TARGET = myvmm
-OBJS = main.o utils.o
+OBJS = myvmm.o
 
-# Default target: build the executable
+.PHONY: all clean
+
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
@@ -12,7 +13,5 @@ $(TARGET): $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Clean target to remove compiled artifacts
-.PHONY: clean
 clean:
 	rm -f $(OBJS) $(TARGET)
