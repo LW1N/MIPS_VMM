@@ -111,7 +111,7 @@ typedef struct {
 
 typedef enum {
     d_s_t,      // Destination, Source, Target format (e.g., add $v0, $a0, $a1)
-    d_s_t_u,     // Destination, Source, Target unsigned format (e.g., addu $v0, $a0, $a1)
+    d_s_t_u,    // Destination, Source, Target unsigned format (e.g., addu $v0, $a0, $a1)
     t_s_i,      // Target, Source, Immediate format (e.g., addi $v0, $a0, 1)
     t_s_i_u,    // Target, Source, Immediate unsigned format (e.g., andi $v0, $a0, 1)
     s_t,        // Source, Target format (e.g., sub $v0, $a0)
@@ -120,6 +120,7 @@ typedef enum {
     none        // No operands format
 } InstructionFormat;
 
+// Template for instruction lines -> Easier parsing and execution
 typedef struct {
     const char *name;
     Opcode opcode;
@@ -189,7 +190,7 @@ typedef enum {
     VM_ERROR
 } VmStatus;
 
-// Virtual machine structure
+// VM structure
 typedef struct {
     // Unique identifier for the virtual machine
     unsigned id;
@@ -216,16 +217,20 @@ typedef struct {
 // Trims leading and trailing whitespace from a string
 static char *trim(char *text)
 {
+    // Pointer to the end of the string after trimming
     char *end;
-
+    
+    // Trim leading whitespace
     while (isspace((unsigned char)*text)) {
         text++;
     }
 
+    // Check if the string is empty after trimming leading whitespace
     if (*text == '\0') {
         return text;
     }
 
+    // Trim trailing whitespace
     end = text + strlen(text) - 1;
     while (end > text && isspace((unsigned char)*end)) {
         end--;
@@ -241,13 +246,18 @@ static bool parse_int32(const char *text, int32_t *value)
     char *end = NULL;
     long long parsed;
 
+    // Validate inputs before parsing
     if (text == NULL || *text == '\0' || value == NULL) {
         return false;
     }
 
+    // Clear any previous errno val before parsing
     errno = 0;
+
+    // Parse the integer val from the string
     parsed = strtoll(text, &end, 0);
 
+    // Check for parsing errors and range validation
     if (errno != 0 || end == text || *end != '\0' ||
         parsed < INT32_MIN || parsed > INT32_MAX) {
         return false;
@@ -257,11 +267,13 @@ static bool parse_int32(const char *text, int32_t *value)
     return true;
 }
 
+// Parses a size_t value from a given string
 static bool parse_size(const char *text, size_t *value)
 {
     char *end = NULL;
     unsigned long long parsed;
 
+    // Validate inputs before parsing
     if (text == NULL || *text == '\0' || value == NULL || *text == '-') {
         return false;
     }
@@ -269,6 +281,7 @@ static bool parse_size(const char *text, size_t *value)
     errno = 0;
     parsed = strtoull(text, &end, 10);
 
+    // Check for parsing errors and range validation
     if (errno != 0 || end == text || *end != '\0' ||
         parsed == 0 || parsed > SIZE_MAX) {
         return false;
@@ -276,30 +289,6 @@ static bool parse_size(const char *text, size_t *value)
 
     *value = (size_t)parsed;
     return true;
-}
-
-
-/* ======================================== VM Functions ======================================== */
-
-// Initializes a virtual machine structure to its default state
-void vm_init(VirtualMachine *vm, unsigned id)
-{
-    vm->id = id;
-    vm->config_path = NULL;
-    vm->binary_path = NULL;
-    vm->execution_slice = 0;
-    vm->cpu = (ProcessorState){0};
-    vm->instructions = NULL;
-    vm->instruction_count = 0;
-    vm->status = VM_READY;
-}
-
-// Dumps the current state of the virtual machine's processor registers
-void dump_processor_state(const VirtualMachine *vm)
-{
-    for (int i = 0; i < 32; i++) {
-        printf("R%d=%" PRIu32 "\n", i, vm->cpu.registers[i]);
-    }
 }
 
 static bool signed_add(int32_t a, int32_t b, int32_t *result)
@@ -325,6 +314,101 @@ static bool signed_sub(int32_t a, int32_t b, int32_t *result)
 
     *result = (int32_t)val;
     return true;
+}
+
+// Tokenizes a line of text into individual tokens,
+// Ignores comments and stores the tokens in the provided array.
+static int tokenize_line(char *line, char *tokens[4])
+{
+    char *comment = strchr(line, '#');
+    char *token;
+    int token_count = 0;
+
+    // If a comment is found, truncate the line at the comment character
+    if (comment) {
+        *comment = '\0';
+    }
+
+    for (char *p = line; *p; ++p) {
+        if (*p == ',') {
+            *p = ' ';
+        }
+    }
+
+    // Tokenize the line using strtok_r
+    token = strtok(line, " \t\r\n");
+    while (token) {
+        if (token_count == 4)
+        {
+            return -1;
+        }
+
+        tokens[token_count++] = token;
+        token = strtok(NULL, " \t\r\n");
+    }
+
+    return token_count;
+}
+
+// Resolves the full path of a binary given its configuration path and relative binary path.
+static char *resolve_binary_path(const char *config_path, const char *binary_path)
+{
+    const char *slash;
+    size_t prefix_length = 0;
+    size_t binary_length = strlen(binary_path);
+    char *result;
+
+    // If the binary path is relative, prepend the directory from the configuration path
+    if (binary_path[0] != '/') {
+        slash = strrchr(config_path, '/');
+        if (slash) {
+            prefix_length = (size_t)(slash - config_path + 1);
+        }
+    }
+
+    // Check if the total length of the resolved path would exceed SIZE_MAX
+    if (prefix_length > SIZE_MAX - binary_length - 1) {
+        return NULL;
+    }
+
+    // Allocate memory for the resolved path
+    result = malloc(prefix_length + binary_length + 1);
+    if (!result) {
+        return NULL;
+    }
+
+    // Copy the prefix and binary path into the result buffer
+    memcpy(result, config_path, prefix_length);
+    memcpy(result + prefix_length, binary_path, binary_length + 1);
+
+    return result;
+}
+
+
+/* ======================================== VM Functions ======================================== */
+
+// Initializes a virtual machine structure to its default state
+void vm_init(VirtualMachine *vm, unsigned id)
+{
+    vm->id = id;
+    vm->config_path = NULL;
+    vm->binary_path = NULL;
+    vm->execution_slice = 0;
+    vm->cpu = (ProcessorState){0};
+    vm->instructions = NULL;
+    vm->instruction_count = 0;
+    vm->status = VM_READY;
+}
+
+// Dumps the current state of the virtual machine's processor registers
+void dump_processor_state(const VirtualMachine *vm)
+{
+    for (int i = 0; i < 32; i++) {
+        printf("R%d=%" PRIu32 "\n", i, vm->cpu.registers[i]);
+    }
+    // printf("PC=%" PRIu32 "\n", vm->cpu.pc);
+    // printf("HI=%" PRIu32 "\n", vm->cpu.hi);
+    // printf("LO=%" PRIu32 "\n", vm->cpu.lo);
 }
 
 
@@ -388,6 +472,7 @@ ExecStatus execute_engine(VirtualMachine *vm, const Instruction *instruction)
             int64_t product = (int64_t)(int32_t)cpu->registers[instruction->rs] *
                 (int64_t)(int32_t)cpu->registers[instruction->rt];
             uint64_t bits = (uint64_t)product;
+            // In case of overflow, the upper 32 bits will be stored in hi and the lower 32 bits in lo
             cpu->hi = (uint32_t)(bits >> 32);
             cpu->lo = (uint32_t)bits;
             break;
@@ -468,7 +553,7 @@ ExecStatus execute_instruction(VirtualMachine *vm)
     ProcessorState *cpu = &vm->cpu;
 
     if (cpu->pc % 4 != 0) {
-        fprintf(stderr, "VM: %d ERROR: Program counter is not aligned to 4 bytes: %d\n", vm->id, cpu->pc);
+        fprintf(stderr, "VM: %u ERROR: Program counter is not aligned to 4 bytes: %" PRIu32 "\n", vm->id, cpu->pc);
         return EXEC_ERROR;
     }
 
@@ -478,7 +563,7 @@ ExecStatus execute_instruction(VirtualMachine *vm)
     // Check if the instruction index is within the valid range
     // If not, something is wrong with the program counter or instruction count
     if (instruct_ind > vm->instruction_count) {
-        fprintf(stderr, "VM: %d ERROR: Instruction index out of bounds: %zu\n", vm->id, instruct_ind);
+        fprintf(stderr, "VM: %u ERROR: Instruction index out of bounds: %zu\n", vm->id, instruct_ind);
         return EXEC_ERROR;
     }
 
@@ -526,40 +611,6 @@ static const InstructionTemplate *find_instruction_template(const char *name)
     return NULL;
 }
 
-// Tokenizes a line of text into individual tokens,
-// Ignores comments and stores the tokens in the provided array.
-static int tokenize_line(char *line, char *tokens[4])
-{
-    char *comment = strchr(line, '#');
-    char *token;
-    int token_count = 0;
-
-    // If a comment is found, truncate the line at the comment character
-    if (comment) {
-        *comment = '\0';
-    }
-
-    for (char *p = line; *p; ++p) {
-        if (*p == ',') {
-            *p = ' ';
-        }
-    }
-
-    // Tokenize the line using strtok_r
-    token = strtok(line, " \t\n");
-    while (token) {
-        if (token_count == 4)
-        {
-            return -1;
-        }
-
-        tokens[token_count++] = token;
-        token = strtok(NULL, " \t\r\n");
-    }
-
-    return token_count;
-}
-
 // Register string token -> Register number
 static bool parse_register(const char *text, int *reg_num)
 {
@@ -584,7 +635,9 @@ static bool parse_register(const char *text, int *reg_num)
         name++;
     }
 
-    if (*name == 'R' || *name == 'r')
+    // Skip the 'R' or 'r' prefix if present, but only if it is followed by a digit
+    // Ensures we keep register 'ra'
+    if ((*name == 'R' || *name == 'r') && isdigit((unsigned char)name[1]))
     {
         name++;
     }
@@ -774,7 +827,7 @@ static bool load_program(VirtualMachine *vm, const char *filename)
 {
     FILE *file = fopen(filename, "r");
     if (!file) {
-        fprintf(stderr, "Error: Failed to open %s\n", filename);
+        fprintf(stderr, "Error: Failed to open %s: %s\n", filename, strerror(errno));
         return false;
     }
 
@@ -832,7 +885,7 @@ static bool load_program(VirtualMachine *vm, const char *filename)
     // Check for read errors after loading instructions
     if (ferror(file))
     {
-        fprintf(stderr, "Error: Failed to read from %s\n", filename);
+        fprintf(stderr, "Error: Failed to read from %s: %s\n", filename, strerror(errno));
         goto finished_loading;
     }
 
@@ -965,8 +1018,15 @@ static bool load_config(VirtualMachine *vm, unsigned id, const char *filename)
         return false;
     }
 
+    // Resolve the full path of the VM binary based on the configuration file and program filepath
+    vm->binary_path = resolve_binary_path(filename, program_filepath);
+    if (!vm->binary_path) {
+        fprintf(stderr, "Error: Failed to resolve VM binary path\n");
+        return false;
+    }
+
     // Load the program into the virtual machine using the parsed configuration
-    return load_program(vm, program_filepath);
+    return load_program(vm, vm->binary_path);
 }
 
 // Run multiple VMs concurrently
@@ -1064,6 +1124,7 @@ done:
     for (size_t i = 0; i < vm_count; i++)
     {
         free(vms[i].instructions);
+        free(vms[i].binary_path);
     }
     free(vms);
     return status;
