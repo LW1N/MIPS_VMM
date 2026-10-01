@@ -1,4 +1,3 @@
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <inttypes.h>
@@ -92,11 +91,13 @@ typedef enum {
     OP_DIV,
     OP_MFHI,
     OP_MFLO,
+    OP_LI,
     // Logical operations
     OP_AND,
     OP_ANDI,
     OP_OR,
     OP_ORI,
+    OP_XOR,
     OP_SLL,
     OP_SRL,
     // Control flow operations
@@ -114,6 +115,8 @@ typedef enum {
     d_s_t_u,    // Destination, Source, Target unsigned format (e.g., addu $v0, $a0, $a1)
     t_s_i,      // Target, Source, Immediate format (e.g., addi $v0, $a0, 1)
     t_s_i_u,    // Target, Source, Immediate unsigned format (e.g., andi $v0, $a0, 1)
+    t_i,        // Target, immediate format (e.g., li $v0, 1)
+    d_s_t_i,    // Destination, source, register-or-immediate target format
     s_t,        // Source, Target format (e.g., sub $v0, $a0)
     shift,      // Shift amount format (e.g., sll $v0, $a0, 2)
     d,          // Destination register format (e.g., mfhi $v0)
@@ -140,11 +143,13 @@ static const InstructionTemplate instruction_defs[] = {
     {"div" ,OP_DIV , s_t},
     {"mfhi", OP_MFHI, d},
     {"mflo", OP_MFLO, d},
+    {"li", OP_LI, t_i},
 
     {"and" ,OP_AND , d_s_t},
     {"andi" ,OP_ANDI , t_s_i_u},
-    {"or" ,OP_OR , d_s_t},
+    {"or" ,OP_OR , d_s_t_i},
     {"ori" ,OP_ORI , t_s_i_u},
+    {"xor" ,OP_XOR , d_s_t_i},
     {"sll" ,OP_SLL , shift},
     {"srl" ,OP_SRL , shift},
 
@@ -504,6 +509,10 @@ ExecStatus execute_engine(VirtualMachine *vm, const Instruction *instruction)
         case OP_MFLO:
             cpu->registers[instruction->rd] = cpu->lo;
             break;
+
+        case OP_LI:
+            cpu->registers[instruction->rt] = (uint32_t)instruction->immediate;
+            break;
         
         // Conditional ops
         case OP_AND:
@@ -515,11 +524,19 @@ ExecStatus execute_engine(VirtualMachine *vm, const Instruction *instruction)
             break;
 
         case OP_OR:
-            cpu->registers[instruction->rd] = cpu->registers[instruction->rs] | cpu->registers[instruction->rt];
+            cpu->registers[instruction->rd] = cpu->registers[instruction->rs] |
+                (instruction->rt >= 0 ? cpu->registers[instruction->rt] :
+                    (uint32_t)instruction->immediate);
             break;
 
         case OP_ORI:
             cpu->registers[instruction->rt] = cpu->registers[instruction->rs] | (uint16_t)instruction->immediate;
+            break;
+
+        case OP_XOR:
+            cpu->registers[instruction->rd] = cpu->registers[instruction->rs] ^
+                (instruction->rt >= 0 ? cpu->registers[instruction->rt] :
+                    (uint32_t)instruction->immediate);
             break;
 
         case OP_SLL:
@@ -739,6 +756,27 @@ static int parse_instruction(char *line, unsigned line_num, const char *filename
                 goto invalid_ops;
             }
             instr->immediate = num;
+            break;
+        // Format: rt, immediate
+        case t_i:
+            if (op_count != 2 || !parse_register(tokens[1], &instr->rt)
+                || !parse_int32(tokens[2], &num)) {
+                goto invalid_ops;
+            }
+            instr->immediate = num;
+            break;
+        // Format: rd, rs, rt or rd, rs, immediate
+        case d_s_t_i:
+            if (op_count != 3 || !parse_register(tokens[1], &instr->rd)
+                || !parse_register(tokens[2], &instr->rs)) {
+                goto invalid_ops;
+            }
+            if (!parse_register(tokens[3], &instr->rt)) {
+                if (!parse_int32(tokens[3], &num)) {
+                    goto invalid_ops;
+                }
+                instr->immediate = num;
+            }
             break;
         // Format: rs, rt
         case s_t:

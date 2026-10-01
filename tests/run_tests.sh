@@ -140,6 +140,22 @@ assert_register "$REGISTER_OUTPUT" 30 9 "numbered register"
 assert_register "$REGISTER_OUTPUT" 31 7 "ra register"
 pass "register parsing results"
 
+SAMPLE_OUTPUT="$TMP_DIR/sample.out"
+run_success "supplied sample programs" \
+    "$SCRIPT_DIR/configs/sample_vm1.conf" "$SAMPLE_OUTPUT"
+assert_dump_format "$SAMPLE_OUTPUT" "sample VM 1 dump"
+assert_register "$SAMPLE_OUTPUT" 3 12 "li positive immediate"
+assert_register "$SAMPLE_OUTPUT" 11 107 "xor immediate"
+
+SAMPLE_2_OUTPUT="$TMP_DIR/sample-2.out"
+run_success "second supplied sample program" \
+    "$SCRIPT_DIR/configs/sample_vm2.conf" "$SAMPLE_2_OUTPUT"
+assert_dump_format "$SAMPLE_2_OUTPUT" "sample VM 2 dump"
+assert_register "$SAMPLE_2_OUTPUT" 3 4294967291 "li negative immediate"
+assert_register "$SAMPLE_2_OUTPUT" 10 30 "xor register"
+assert_register "$SAMPLE_2_OUTPUT" 11 116 "or immediate"
+pass "sample instruction results"
+
 if ! (cd "$TMP_DIR" && "$VMM" -v "$PROJECT_DIR/test/arithmetic.conf" \
     >"$TMP_DIR/other-directory.out" 2>"$TMP_DIR/other-directory.err"); then
     cat "$TMP_DIR/other-directory.err" >&2
