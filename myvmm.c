@@ -420,9 +420,7 @@ void dump_processor_state(const VirtualMachine *vm)
     // printf("LO=%" PRIu32 "\n", vm->cpu.lo);
 }
 
-
-/* ======================================== Execution Engine ======================================== */
-// Snapshot v1: header, next PC, HI, LO, then R0 through R31 (decimal, one per line).
+// Snapshot Format: header, next PC, HI, LO, then R0 through R31 (decimal, one per line).
 static bool save_snapshot(const VirtualMachine *vm, const char *path)
 {
     FILE *file = fopen(path, "w");
@@ -497,6 +495,8 @@ static bool load_snapshot(VirtualMachine *vm, const char *path)
     return true;
 }
 
+
+/* ======================================== Execution Engine ======================================== */
 // Executes a single instruction for the given VM and instruction
 ExecStatus execute_engine(VirtualMachine *vm, const Instruction *instruction)
 {
