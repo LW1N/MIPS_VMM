@@ -48,10 +48,18 @@ run_failure()
     name=$1
     config=$2
     expected_error=$3
+    run_args_failure "$name" "$expected_error" -v "$config"
+}
+
+run_args_failure()
+{
+    name=$1
+    expected_error=$2
+    shift 2
     output="$TMP_DIR/failure.out"
     error_output="$TMP_DIR/failure.err"
 
-    if "$VMM" -v "$config" >"$output" 2>"$error_output"; then
+    if "$VMM" "$@" >"$output" 2>"$error_output"; then
         fail "$name returned success"
     fi
 
@@ -201,5 +209,137 @@ run_failure "zero execution slice" "$SCRIPT_DIR/configs/invalid_slice.conf" \
     "invalid value for vm_exec_slice_in_instructions"
 run_failure "unknown configuration key" "$SCRIPT_DIR/configs/unknown_key.conf" \
     "unknown key"
+
+# Snapshot paths are relative to the working directory, not the config directory.
+cd "$TMP_DIR" || fail "cannot enter temporary directory"
+run_success "snapshot creation and continued execution" "$SCRIPT_DIR/configs/snapshot_vm1.conf" "$TMP_DIR/snapshot.out"
+# Reuse that configuration for the subsequent restore and failure checks.
+printf '%s\n' 'vm_exec_slice_in_instructions=2' \
+    "vm_binary=$SCRIPT_DIR/programs/snapshot_vm1.asm" >snapshot.conf
+[ -f checkpoint.snapshot ] && [ -f second.snapshot ] || fail "snapshot files missing"
+cmp checkpoint.snapshot "$SCRIPT_DIR/snapshots/snapshot_vm1.snapshot" || fail "example snapshot differs from generated state"
+pass "checked-in example snapshot matches generated snapshot"
+sed -n '1,32p' snapshot.out | cut -d= -f2 >expected-registers
+sed -n '5,36p' checkpoint.snapshot >saved-registers
+cmp expected-registers saved-registers || fail "snapshot did not save all registers"
+[ "$(sed -n '2p' checkpoint.snapshot)" = 144 ] || fail "wrong next PC"
+[ "$(sed -n '3p' checkpoint.snapshot)" = 4294967295 ] || fail "wrong saved HI"
+[ "$(sed -n '4p' checkpoint.snapshot)" = 4294967275 ] || fail "wrong saved LO"
+pass "snapshot contains full CPU state and next PC"
+
+mv checkpoint.snapshot resume.snapshot
+mkdir checkpoint.snapshot
+if ! "$VMM" -v snapshot.conf -s resume.snapshot >restored.out 2>restored.err; then
+    cat restored.err >&2
+    fail "snapshot restore"
+fi
+sed -n '33,64p' snapshot.out >expected-restored.out
+cmp expected-restored.out restored.out || fail "restored execution differs from uninterrupted execution"
+assert_dump_format restored.out "restored dump"
+assert_register restored.out 16 4294967295 "restored HI"
+assert_register restored.out 17 4294967275 "restored LO"
+pass "restore skips prior instructions and snapshot, preserves all registers and HI/LO"
+
+if ! "$VMM" -v snapshot.conf -s resume.snapshot \
+    -v "$SCRIPT_DIR/configs/registers.conf" >mixed.out 2>mixed.err; then
+    cat mixed.err >&2
+    fail "mixed restored and fresh VMs"
+fi
+sed -n '1,32p' mixed.out >mixed-fresh.out
+sed -n '33,64p' mixed.out >mixed-restored.out
+cmp "$REGISTER_OUTPUT" mixed-fresh.out || fail "fresh VM inherited snapshot state"
+cmp restored.out mixed-restored.out || fail "restored VM changed in mixed invocation"
+[ "$(wc -l <mixed.out | tr -d ' ')" = 64 ] || fail "wrong mixed output length"
+pass "per-VM snapshot association and isolation"
+
+if ! "$VMM" -v "$SCRIPT_DIR/configs/registers.conf" -v snapshot.conf -s resume.snapshot \
+    >mixed-reversed.out 2>mixed-reversed.err; then
+    cat mixed-reversed.err >&2
+    fail "snapshot on second VM"
+fi
+cmp mixed.out mixed-reversed.out || fail "snapshot associated with wrong VM"
+pass "snapshot option on second VM"
+
+if ! "$VMM" -v "$SCRIPT_DIR/configs/snapshot_vm1.conf" \
+    -s "$SCRIPT_DIR/snapshots/snapshot_vm1.snapshot" \
+    -v "$SCRIPT_DIR/configs/snapshot_vm2.conf" >examples.out 2>examples.err; then
+    cat examples.err >&2
+    fail "runnable mixed-VM examples"
+fi
+sed -n '1,32p' examples.out >example-fresh.out
+sed -n '33,64p' examples.out >example-restored.out
+assert_dump_format example-fresh.out "example fresh VM"
+assert_register example-fresh.out 8 105 "example fresh VM starts from zero"
+assert_register example-fresh.out 16 0 "example fresh VM has no restored registers"
+cmp restored.out example-restored.out || fail "example VM restore differs"
+[ "$(wc -l <examples.out | tr -d ' ')" = 64 ] || fail "wrong example output length"
+pass "runnable examples restore VM1 and start VM2 fresh"
+
+awk '{ printf "%s\r\n", $0 } END { printf " \t\r\n" }' resume.snapshot >crlf.snapshot
+if ! "$VMM" -v snapshot.conf -s crlf.snapshot >crlf-restored.out 2>crlf-restored.err; then
+    cat crlf-restored.err >&2
+    fail "CRLF snapshot restore"
+fi
+cmp restored.out crlf-restored.out || fail "CRLF snapshot changed state"
+pass "CRLF snapshot with trailing whitespace"
+
+if ! "$VMM" -v snapshot.conf -s resume.snapshot -v snapshot.conf -s second.snapshot \
+    >two-restored.out 2>two-restored.err; then
+    cat two-restored.err >&2
+    fail "two restored VMs"
+fi
+sed -n '1,32p' two-restored.out >first-restored.out
+sed -n '33,64p' two-restored.out >second-restored.out
+cmp restored.out first-restored.out || fail "first restored VM differs"
+cmp restored.out second-restored.out || fail "second restored VM differs"
+pass "independent snapshots for multiple VMs"
+
+printf '%s\n' 'SNAPSHOT end.snapshot' >end.asm
+printf '%s\n' 'vm_exec_slice_in_instructions=1' 'vm_binary=end.asm' >end.conf
+run_success "snapshot at final instruction" "$TMP_DIR/end.conf" "$TMP_DIR/end.out"
+mv end.snapshot finished.snapshot
+mkdir end.snapshot
+if ! "$VMM" -v end.conf -s finished.snapshot >finished.out 2>finished.err; then
+    cat finished.err >&2
+    fail "restore at program end"
+fi
+[ ! -s finished.out ] || fail "finished VM executed instructions"
+pass "restore at program end halts normally"
+
+run_args_failure "missing snapshot file" "Cannot read snapshot" -v snapshot.conf -s missing.snapshot
+run_args_failure "snapshot write failure" "Cannot write snapshot" -v snapshot.conf
+run_args_failure "snapshot failure allows other VMs to finish" "Cannot write snapshot" \
+    -v snapshot.conf -v "$SCRIPT_DIR/configs/registers.conf"
+sed -n '1,32p' "$TMP_DIR/failure.out" >failure-fresh.out
+cmp "$REGISTER_OUTPUT" failure-fresh.out || fail "snapshot error prevented fresh VM from completing"
+printf '%s\n' 'SNAPSHOT missing-directory/output.snapshot' >end.asm
+run_args_failure "missing snapshot output directory" "Cannot write snapshot" -v end.conf
+printf '%s\n' 'SNAPSHOT' >end.asm
+run_args_failure "missing SNAPSHOT operand" "Invalid operands" -v end.conf
+printf '%s\n' 'SNAPSHOT one two' >end.asm
+run_args_failure "extra SNAPSHOT operand" "Invalid operands" -v end.conf
+
+# Mutate one field at a time in an otherwise valid snapshot.
+for mutation in '1:BAD_HEADER' '1:MIPS_VMM_SNAPSHOT 2' '2:1' '2:4000' \
+    '3:-1' '4:4294967296' '5:1' '6:abc' '6:18446744073709551616' '6:12junk'; do
+    field=${mutation%%:*}
+    value=${mutation#*:}
+    awk -v field="$field" -v value="$value" 'NR == field { $0 = value } { print }' \
+        resume.snapshot >bad.snapshot
+    run_args_failure "invalid snapshot field $mutation" "Invalid snapshot" -v snapshot.conf -s bad.snapshot
+done
+sed -n '1,35p' resume.snapshot >bad.snapshot
+run_args_failure "truncated snapshot" "Invalid snapshot" -v snapshot.conf -s bad.snapshot
+cp resume.snapshot bad.snapshot
+printf '%s\n' 'extra data' >>bad.snapshot
+run_args_failure "extra snapshot data" "Invalid snapshot" -v snapshot.conf -s bad.snapshot
+printf '' >bad.snapshot
+run_args_failure "empty snapshot" "Invalid snapshot" -v snapshot.conf -s bad.snapshot
+
+run_args_failure "snapshot before VM" "Usage:" -s resume.snapshot -v snapshot.conf
+run_args_failure "duplicate snapshot option" "Usage:" -v snapshot.conf -s resume.snapshot -s resume.snapshot
+run_args_failure "missing snapshot argument" "Usage:" -v snapshot.conf -s
+run_args_failure "missing VM argument" "Usage:" -v snapshot.conf -s resume.snapshot -v
+run_args_failure "unknown option" "Usage:" -v snapshot.conf -x resume.snapshot
 
 echo "All $TEST_COUNT tests passed."

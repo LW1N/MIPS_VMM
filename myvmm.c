@@ -101,7 +101,8 @@ typedef enum {
     OP_SLL,
     OP_SRL,
     // Control flow operations
-    OP_DUMP_PROCESSOR_STATE
+    OP_DUMP_PROCESSOR_STATE,
+    OP_SNAPSHOT
 } Opcode;
 
 // Opcode alias structure for mapping MIPS opcode names to their corresponding enum values
@@ -120,7 +121,8 @@ typedef enum {
     s_t,        // Source, Target format (e.g., sub $v0, $a0)
     shift,      // Shift amount format (e.g., sll $v0, $a0, 2)
     d,          // Destination register format (e.g., mfhi $v0)
-    none        // No operands format
+    none,       // No operands format
+    snapshot_file // Snapshot output path
 } InstructionFormat;
 
 // Template for instruction lines -> Easier parsing and execution
@@ -153,7 +155,8 @@ static const InstructionTemplate instruction_defs[] = {
     {"sll" ,OP_SLL , shift},
     {"srl" ,OP_SRL , shift},
 
-    {"dump_processor_state", OP_DUMP_PROCESSOR_STATE, none}
+    {"dump_processor_state", OP_DUMP_PROCESSOR_STATE, none},
+    {"snapshot", OP_SNAPSHOT, snapshot_file}
 };
 
 // Parsed instruction struct
@@ -178,6 +181,7 @@ typedef struct {
 
     // Source line number for debugging purposes
     unsigned source_line;
+    char snapshot_path[MAX_LINE_LENGTH];
 } Instruction;
 
 // Execution status enum for instruction execution results
@@ -418,6 +422,81 @@ void dump_processor_state(const VirtualMachine *vm)
 
 
 /* ======================================== Execution Engine ======================================== */
+// Snapshot v1: header, next PC, HI, LO, then R0 through R31 (decimal, one per line).
+static bool save_snapshot(const VirtualMachine *vm, const char *path)
+{
+    FILE *file = fopen(path, "w");
+    if (!file) {
+        fprintf(stderr, "Error: Cannot write snapshot %s: %s\n", path, strerror(errno));
+        return false;
+    }
+
+    bool valid = fprintf(file, "MIPS_VMM_SNAPSHOT 1\n%" PRIu32 "\n%" PRIu32 "\n%" PRIu32 "\n",
+                         vm->cpu.pc + 4, vm->cpu.hi, vm->cpu.lo) >= 0;
+    for (size_t i = 0; valid && i < MIPS_REGISTER_COUNT; i++) {
+        valid = fprintf(file, "%" PRIu32 "\n", vm->cpu.registers[i]) >= 0;
+    }
+    if (fclose(file) != 0) {
+        valid = false;
+    }
+    if (!valid) {
+        fprintf(stderr, "Error: Failed to write snapshot %s\n", path);
+    }
+    return valid;
+}
+
+static bool load_snapshot(VirtualMachine *vm, const char *path)
+{
+    FILE *file = fopen(path, "r");
+    if (!file) {
+        fprintf(stderr, "Error: Cannot read snapshot %s: %s\n", path, strerror(errno));
+        return false;
+    }
+
+    char line[MAX_LINE_LENGTH];
+    uint32_t values[MIPS_REGISTER_COUNT + 3];
+    bool valid = fgets(line, sizeof(line), file) != NULL &&
+                 strcmp(trim(line), "MIPS_VMM_SNAPSHOT 1") == 0;
+    for (size_t i = 0; valid && i < MIPS_REGISTER_COUNT + 3; i++) {
+        if (!fgets(line, sizeof(line), file)) {
+            valid = false;
+            break;
+        }
+        char *number = trim(line);
+        char *end;
+        errno = 0;
+        unsigned long long value = strtoull(number, &end, 10);
+        valid = isdigit((unsigned char)*number) && errno == 0 &&
+                *end == '\0' && value <= UINT32_MAX;
+        values[i] = (uint32_t)value;
+    }
+    // Reject extra data; trailing whitespace is harmless.
+    int ch;
+    while (valid && (ch = fgetc(file)) != EOF) {
+        valid = isspace((unsigned char)ch) != 0;
+    }
+    if (ferror(file)) {
+        valid = false;
+    }
+    if (fclose(file) != 0) {
+        valid = false;
+    }
+    if (valid) {
+        valid = values[0] % 4 == 0 && values[0] / 4 <= vm->instruction_count &&
+                values[3] == 0;
+    }
+    if (!valid) {
+        fprintf(stderr, "Error: Invalid snapshot %s\n", path);
+        return false;
+    }
+
+    vm->cpu.pc = values[0];
+    vm->cpu.hi = values[1];
+    vm->cpu.lo = values[2];
+    memcpy(vm->cpu.registers, values + 3, sizeof(vm->cpu.registers));
+    return true;
+}
+
 // Executes a single instruction for the given VM and instruction
 ExecStatus execute_engine(VirtualMachine *vm, const Instruction *instruction)
 {
@@ -549,6 +628,11 @@ ExecStatus execute_engine(VirtualMachine *vm, const Instruction *instruction)
 
         case OP_DUMP_PROCESSOR_STATE:
             dump_processor_state(vm);
+            break;
+        case OP_SNAPSHOT:
+            if (!save_snapshot(vm, instruction->snapshot_path)) {
+                return EXEC_ERROR;
+            }
             break;
         default:
             // Handle unsupported instructions or errors here.
@@ -806,6 +890,12 @@ static int parse_instruction(char *line, unsigned line_num, const char *filename
                 goto invalid_ops;
             }
             break;
+        case snapshot_file:
+            if (op_count != 1) {
+                goto invalid_ops;
+            }
+            strcpy(instr->snapshot_path, tokens[1]);
+            break;
         default:
             fprintf(stderr, "Error: Unsupported instruction format for '%s' in line %u of %s\n", tokens[0], line_num, filename);
             return -1;
@@ -877,7 +967,7 @@ static bool load_program(VirtualMachine *vm, const char *filename)
     bool result = false;
 
     // Count the # of instructs in the file to determine the size of the program array
-    if (!count_instructions(file, filename, &instruction_count) || instruction_count > UINT32_MAX
+    if (!count_instructions(file, filename, &instruction_count) || instruction_count > UINT32_MAX / 4
         || instruction_count > SIZE_MAX / sizeof(*program)) {
         goto finished_loading;
     }
@@ -1115,7 +1205,7 @@ static bool run_vms(VirtualMachine *vms, size_t count)
 // Print usage information for the command-line tool
 static void usage(const char *name)
 {
-    fprintf(stderr, "Usage: %s -v config_file [-v config_file ...] \n", name);
+    fprintf(stderr, "Usage: %s -v config_file [-s snapshot_file] [-v config_file [-s snapshot_file] ...]\n", name);
 }
 
 // Main function to run VMs
@@ -1123,7 +1213,7 @@ int main(int argc, char **argv)
 {
     // Allocate memory for the VMs and initialize variables
     VirtualMachine *vms;
-    size_t vm_count;
+    size_t vm_count = 0;
     int status = EXIT_FAILURE;
 
     if (argc < 3 || (argc - 1) % 2)
@@ -1132,7 +1222,17 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
-    vm_count = (size_t)(argc - 1) / 2;
+    // Validate option groups and count VMs before allocating or opening files.
+    for (int arg = 1; arg < argc; arg += 2) {
+        if (strcmp(argv[arg], "-v") != 0) {
+            usage(argv[0]);
+            return EXIT_FAILURE;
+        }
+        vm_count++;
+        if (arg + 2 < argc && strcmp(argv[arg + 2], "-s") == 0) {
+            arg += 2;
+        }
+    }
     vms = calloc(vm_count, sizeof(*vms));
     if (!vms)
     {
@@ -1141,16 +1241,19 @@ int main(int argc, char **argv)
     }
 
     // Parse and load the config file for each VM
+    int arg = 1;
     for (size_t i = 0; i < vm_count; i++)
     {
-        size_t arg = 1 + i * 2;
-        if (strcmp(argv[arg], "-v") != 0 || !load_config(&vms[i], (unsigned)i + 1, argv[arg + 1]))
+        if (!load_config(&vms[i], (unsigned)i + 1, argv[arg + 1]))
         {
-            if (strcmp(argv[arg], "-v") != 0)
-            {
-                usage(argv[0]);
-            }
             goto done;
+        }
+        arg += 2;
+        if (arg < argc && strcmp(argv[arg], "-s") == 0) {
+            if (!load_snapshot(&vms[i], argv[arg + 1])) {
+                goto done;
+            }
+            arg += 2;
         }
     }
 
