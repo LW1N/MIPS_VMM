@@ -429,8 +429,11 @@ static bool save_snapshot(const VirtualMachine *vm, const char *path)
         return false;
     }
 
+    // Write next PC, HI, LO registers first
     bool valid = fprintf(file, "MIPS_VMM_SNAPSHOT 1\n%" PRIu32 "\n%" PRIu32 "\n%" PRIu32 "\n",
                          vm->cpu.pc + 4, vm->cpu.hi, vm->cpu.lo) >= 0;
+
+    // Write R0-R31 registers
     for (size_t i = 0; valid && i < MIPS_REGISTER_COUNT; i++) {
         valid = fprintf(file, "%" PRIu32 "\n", vm->cpu.registers[i]) >= 0;
     }
@@ -443,6 +446,7 @@ static bool save_snapshot(const VirtualMachine *vm, const char *path)
     return valid;
 }
 
+// Loads a snapshot of vm state from file
 static bool load_snapshot(VirtualMachine *vm, const char *path)
 {
     FILE *file = fopen(path, "r");
@@ -453,8 +457,12 @@ static bool load_snapshot(VirtualMachine *vm, const char *path)
 
     char line[MAX_LINE_LENGTH];
     uint32_t values[MIPS_REGISTER_COUNT + 3];
+
+    // Ensure header line matches the expected snapshot format
     bool valid = fgets(line, sizeof(line), file) != NULL &&
                  strcmp(trim(line), "MIPS_VMM_SNAPSHOT 1") == 0;
+
+    // Read the next PC, HI, LO, and R0-R31 values from the snapshot file
     for (size_t i = 0; valid && i < MIPS_REGISTER_COUNT + 3; i++) {
         if (!fgets(line, sizeof(line), file)) {
             valid = false;
@@ -468,6 +476,7 @@ static bool load_snapshot(VirtualMachine *vm, const char *path)
                 *end == '\0' && value <= UINT32_MAX;
         values[i] = (uint32_t)value;
     }
+
     // Reject extra data; trailing whitespace is harmless.
     int ch;
     while (valid && (ch = fgetc(file)) != EOF) {
@@ -479,6 +488,9 @@ static bool load_snapshot(VirtualMachine *vm, const char *path)
     if (fclose(file) != 0) {
         valid = false;
     }
+
+    // Validate the loaded snapshot values
+    // PC must be 4-byte aligned, R0 must be zero, and the next PC must not exceed the instruction count
     if (valid) {
         valid = values[0] % 4 == 0 && values[0] / 4 <= vm->instruction_count &&
                 values[3] == 0;
@@ -488,6 +500,7 @@ static bool load_snapshot(VirtualMachine *vm, const char *path)
         return false;
     }
 
+    // Populate the VM's CPU state with the loaded snapshot values
     vm->cpu.pc = values[0];
     vm->cpu.hi = values[1];
     vm->cpu.lo = values[2];
